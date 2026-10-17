@@ -26,10 +26,20 @@ import type {
   CursorRequestOptions,
   ActivityPage,
   ActivityPageOptions,
+  ClaimJobParams,
+  HeartbeatJobParams,
+  ExtendJobLeaseParams,
+  ReleaseJobParams,
+  ReportJobProgressParams,
+  ClaimedJob,
+  HeartbeatResponse,
+  ReleaseJobResponse,
+  JobProgressResponse,
 } from "./types.js";
 import {
   TalosAPIError,
   TalosPaymentError,
+  TalosConflictError,
   classifyTransportError,
   errorFromResponse,
   parseX402Challenge,
@@ -1297,6 +1307,101 @@ export class TalosClient {
 
   async getJobResult(jobId: string, options?: ReadOptions): Promise<CommerceJob> {
     return this.request(`/api/jobs/${jobId}/result`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+  }
+
+  // ── Job lease lifecycle ───────────────────────────────────
+
+  /**
+   * Claim a job for processing. On success the caller receives a fencing token
+   * that must be supplied on subsequent heartbeat, extend, release, and
+   * progress calls.
+   *
+   * A 409 response (job already leased, not pending, or agent inactive) maps
+   * to a {@link TalosConflictError} with `code: "conflict_error"`.
+   */
+  async claimJob(
+    jobId: string,
+    params?: ClaimJobParams,
+    options?: WriteOptions,
+  ): Promise<ClaimedJob> {
+    return this.request(`/api/jobs/${jobId}/claim`, {
+      method: "POST",
+      body: JSON.stringify(params ?? {}),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * Send a heartbeat to renew an active job lease. Requires the fencing token
+   * returned from {@link claimJob}. A 409 response (lease not held, fencing
+   * token mismatch, or agent inactive) maps to a {@link TalosConflictError}.
+   */
+  async heartbeatJob(
+    jobId: string,
+    params: HeartbeatJobParams,
+    options?: WriteOptions,
+  ): Promise<HeartbeatResponse> {
+    return this.request(`/api/jobs/${jobId}/heartbeat`, {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * Extend a job lease. This is a convenience alias for {@link heartbeatJob}
+   * that sends a heartbeat to renew the lease. A 409 response maps to a
+   * {@link TalosConflictError}.
+   */
+  async extendJobLease(
+    jobId: string,
+    params: ExtendJobLeaseParams,
+    options?: WriteOptions,
+  ): Promise<HeartbeatResponse> {
+    return this.heartbeatJob(jobId, { fencingToken: params.fencingToken }, options);
+  }
+
+  /**
+   * Release a job lease back to the pending pool. Requires the fencing token
+   * returned from {@link claimJob}. A 409 response (lease not held or fencing
+   * token mismatch) maps to a {@link TalosConflictError}.
+   */
+  async releaseJob(
+    jobId: string,
+    params: ReleaseJobParams,
+    options?: WriteOptions,
+  ): Promise<ReleaseJobResponse> {
+    return this.request(`/api/jobs/${jobId}/release`, {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * Report mid-job progress (percent, stage, message) for a leased job.
+   * Optionally supply the fencing token for optimistic concurrency. A 409
+   * response (job completed, leased by another worker, or fencing token
+   * mismatch) maps to a {@link TalosConflictError}.
+   */
+  async reportJobProgress(
+    jobId: string,
+    params: ReportJobProgressParams,
+    options?: WriteOptions,
+  ): Promise<JobProgressResponse> {
+    return this.request(`/api/jobs/${jobId}/progress`, {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
   }
 
   // ── Leaderboard ────────────────────────────────────────────
