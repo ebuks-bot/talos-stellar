@@ -11,6 +11,7 @@ from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from talos_agent.circuit_breaker import CircuitBreakerConfig
+from talos_agent.http import validate_tool_timeout
 
 APP_DIR = Path.home() / ".talos-agent"
 
@@ -309,6 +310,24 @@ class Settings(BaseSettings):
         validation_alias="TALOS_TOOL_TIMEOUT_SECONDS",
         description="Maximum seconds for a single external tool call before it is cancelled.",
     )
+
+    # Publishing tool timeout (Issue #873)
+    # Default 90 preserves the previous hard-coded _TIMEOUT in publishing.py.
+    # Browser-based X posting can need longer; API adapters (Telegram/Discord)
+    # should fail faster. Validated via http.validate_tool_timeout at load time.
+    publish_timeout_seconds: float = Field(
+        default=90,
+        ge=1,
+        le=300,
+        validation_alias="TALOS_PUBLISH_TIMEOUT",
+        description="Maximum seconds for a publishing tool action before it is cancelled.",
+    )
+
+    @field_validator("publish_timeout_seconds")
+    @classmethod
+    def validate_publish_timeout(cls, value: float) -> float:
+        """Validate via http.validate_tool_timeout so bounds stay consistent."""
+        return validate_tool_timeout(value)
 
     # Job leasing
     job_lease_ttl: int = Field(
