@@ -26,18 +26,18 @@ import type {
   CursorRequestOptions,
   ActivityPage,
   ActivityPageOptions,
-  ClaimJobParams,
-  HeartbeatJobParams,
-  ExtendJobLeaseParams,
-  ReleaseJobParams,
-  ReportJobProgressParams,
-  ClaimedJob,
-  HeartbeatResponse,
-  ReleaseJobResponse,
-  JobProgressResponse,
+  JobPaymentStatus,
 } from "./types.js";
 import {
+  AsyncPaginationIterator,
+  createPaginationIterator,
+  PaginationAbortedError,
+  PaginationLimitExceededError,
+  type AsyncPaginationIteratorOptions,
+} from "./pagination.js";
+import {
   TalosAPIError,
+  TalosTransportError,
   TalosPaymentError,
   TalosConflictError,
   classifyTransportError,
@@ -568,7 +568,13 @@ export class TalosClient {
 
   /** Resolve the fetch implementation per request. Prefer override; fall back to global. */
   private resolveFetch(): typeof fetch {
-    return this.fetchOverride ?? globalThis.fetch;
+    const fetchFn = this.fetchOverride ?? globalThis.fetch;
+    if (typeof fetchFn !== "function") {
+      throw new TalosTransportError(0, "Fetch implementation is unavailable", "", {
+        message: "Fetch implementation is unavailable",
+      });
+    }
+    return fetchFn;
   }
 
   // ── Internal helpers ───────────────────────────────────────
@@ -719,6 +725,30 @@ export class TalosClient {
     return Math.floor(this.retryPolicy.random() * delay);
   }
 
+  private parseRetryAfter(header: string | null): number | null {
+    if (!header) return null;
+    const trimmed = header.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    if (trimmed.length > 1024) {
+      return null;
+    }
+
+    const seconds = Number(trimmed);
+    if (!Number.isNaN(seconds)) {
+      return Math.max(0, seconds * 1000);
+    }
+
+    const parsedDate = Date.parse(trimmed);
+    if (!Number.isNaN(parsedDate)) {
+      const delta = parsedDate - Date.now();
+      return delta > 0 ? delta : 0;
+    }
+
+    return null;
+  }
+
   private wait(delayMs: number, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) {
       return Promise.reject(new Error("Request aborted"));
@@ -748,6 +778,15 @@ export class TalosClient {
     if (!configured || configured <= 1) return 1;
     if (this.retry.idempotentOnly && !idempotent) return 1;
     return Math.max(1, Math.min(configured, MAX_TYPED_RETRY_ATTEMPTS));
+  }
+
+  /**
+   * Detect whether the client is operating in a legacy environment lacking
+   * modern web features (e.g., `AbortController`, `crypto.randomUUID`).
+   * Returns `true` if the environment is modern, `false` otherwise.
+   */
+  private isModernEnvironment(): boolean {
+    return typeof AbortController !== "undefined" && typeof globalThis.crypto?.randomUUID === "function";
   }
 
   /**
@@ -833,6 +872,14 @@ export class TalosClient {
     const callerSignal = signal ?? undefined;
     const method = (requestInit.method ?? "GET").toUpperCase();
     const url = this.buildUrl(path, params);
+    if (!this.isModernEnvironment()) {
+      throw new TalosAPIError(
+        501,
+        "Client requires a modern environment with AbortController and crypto.randomUUID",
+        path,
+      );
+    }
+
 
     const extraHeaders: Record<string, string> = {};
     if (idempotencyKey !== undefined) {
@@ -933,12 +980,44 @@ export class TalosClient {
     return this.requestPage("/api/talos", params);
   }
 
+  /**
+   * Async iterator for paginated Talos list.
+   *
+   * @example
+   * ```ts
+   * for await (const talos of client.paginateTaloses({ limit: 50 })) {
+   *   console.log(talos.name);
+   * }
+   * ```
+   */
+  paginateTaloses(options?: AsyncPaginationIteratorOptions & CursorRequestOptions): AsyncPaginationIterator<Talos> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<Talos>(
+      (opts) => this.listTaloses({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
+  }
+
   async getTalos(id: string, options?: ReadOptions): Promise<TalosDetail> {
     return this.request(`/api/talos/${id}`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   async getTalosMe(options?: ReadOptions): Promise<TalosDetail> {
     return this.request("/api/talos/me", { signal: options?.signal, timeoutMs: options?.timeoutMs });
+  }
+
+  /**
+   * Check whether an agent name is available for registration.
+   */
+  async checkNameAvailability(
+    name: string,
+    options?: ReadOptions,
+  ): Promise<{ available: boolean; reason?: string }> {
+    return this.request("/api/talos/check-name", {
+      params: { name },
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
   }
 
   async createTalos(params: CreateTalosParams): Promise<TalosCreated> {
@@ -1049,6 +1128,24 @@ export class TalosClient {
   ): Promise<CursorPage<CommerceService>> {
     const { signal, timeoutMs, ...query } = params ?? {};
     return this.requestPage("/api/services", { ...query, signal, timeoutMs });
+  }
+
+  /**
+   * Async iterator for paginated service discovery.
+   *
+   * @example
+   * ```ts
+   * for await (const service of client.paginateServices({ category: "Marketing" })) {
+   *   console.log(service.serviceName, service.price);
+   * }
+   * ```
+   */
+  paginateServices(options?: AsyncPaginationIteratorOptions & DiscoverServicesParams): AsyncPaginationIterator<CommerceService> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<CommerceService>(
+      (opts) => this.discoverServices({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
   }
 
   async purchaseService(
@@ -1309,99 +1406,20 @@ export class TalosClient {
     return this.request(`/api/jobs/${jobId}/result`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
-  // ── Job lease lifecycle ───────────────────────────────────
-
   /**
-   * Claim a job for processing. On success the caller receives a fencing token
-   * that must be supplied on subsequent heartbeat, extend, release, and
-   * progress calls.
+   * Get the on-chain payment finality status for a commerce job.
    *
-   * A 409 response (job already leased, not pending, or agent inactive) maps
-   * to a {@link TalosConflictError} with `code: "conflict_error"`.
+    * @throws `TalosNotFoundError` when the job does not belong to `talosId` or does not exist.
    */
-  async claimJob(
+  async getJobPaymentStatus(
+    talosId: string,
     jobId: string,
-    params?: ClaimJobParams,
-    options?: WriteOptions,
-  ): Promise<ClaimedJob> {
-    return this.request(`/api/jobs/${jobId}/claim`, {
-      method: "POST",
-      body: JSON.stringify(params ?? {}),
-      idempotencyKey: options?.idempotencyKey,
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
-    });
-  }
-
-  /**
-   * Send a heartbeat to renew an active job lease. Requires the fencing token
-   * returned from {@link claimJob}. A 409 response (lease not held, fencing
-   * token mismatch, or agent inactive) maps to a {@link TalosConflictError}.
-   */
-  async heartbeatJob(
-    jobId: string,
-    params: HeartbeatJobParams,
-    options?: WriteOptions,
-  ): Promise<HeartbeatResponse> {
-    return this.request(`/api/jobs/${jobId}/heartbeat`, {
-      method: "POST",
-      body: JSON.stringify(params),
-      idempotencyKey: options?.idempotencyKey,
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
-    });
-  }
-
-  /**
-   * Extend a job lease. This is a convenience alias for {@link heartbeatJob}
-   * that sends a heartbeat to renew the lease. A 409 response maps to a
-   * {@link TalosConflictError}.
-   */
-  async extendJobLease(
-    jobId: string,
-    params: ExtendJobLeaseParams,
-    options?: WriteOptions,
-  ): Promise<HeartbeatResponse> {
-    return this.heartbeatJob(jobId, { fencingToken: params.fencingToken }, options);
-  }
-
-  /**
-   * Release a job lease back to the pending pool. Requires the fencing token
-   * returned from {@link claimJob}. A 409 response (lease not held or fencing
-   * token mismatch) maps to a {@link TalosConflictError}.
-   */
-  async releaseJob(
-    jobId: string,
-    params: ReleaseJobParams,
-    options?: WriteOptions,
-  ): Promise<ReleaseJobResponse> {
-    return this.request(`/api/jobs/${jobId}/release`, {
-      method: "POST",
-      body: JSON.stringify(params),
-      idempotencyKey: options?.idempotencyKey,
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
-    });
-  }
-
-  /**
-   * Report mid-job progress (percent, stage, message) for a leased job.
-   * Optionally supply the fencing token for optimistic concurrency. A 409
-   * response (job completed, leased by another worker, or fencing token
-   * mismatch) maps to a {@link TalosConflictError}.
-   */
-  async reportJobProgress(
-    jobId: string,
-    params: ReportJobProgressParams,
-    options?: WriteOptions,
-  ): Promise<JobProgressResponse> {
-    return this.request(`/api/jobs/${jobId}/progress`, {
-      method: "POST",
-      body: JSON.stringify(params),
-      idempotencyKey: options?.idempotencyKey,
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
-    });
+    options?: ReadOptions,
+  ): Promise<JobPaymentStatus> {
+    return this.request(
+      `/api/talos/${encodeURIComponent(talosId)}/jobs/${encodeURIComponent(jobId)}/payment-status`,
+      { signal: options?.signal, timeoutMs: options?.timeoutMs },
+    );
   }
 
   // ── Leaderboard ────────────────────────────────────────────
@@ -1410,6 +1428,24 @@ export class TalosClient {
     params?: CursorRequestOptions,
   ): Promise<CursorPage<LeaderboardEntry>> {
     return this.requestPage("/api/leaderboard", params);
+  }
+
+  /**
+   * Async iterator for paginated leaderboard.
+   *
+   * @example
+   * ```ts
+   * for await (const entry of client.paginateLeaderboard({ limit: 50 })) {
+   *   console.log(entry.name, entry.totalRevenue);
+   * }
+   * ```
+   */
+  paginateLeaderboard(options?: AsyncPaginationIteratorOptions & CursorRequestOptions): AsyncPaginationIterator<LeaderboardEntry> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<LeaderboardEntry>(
+      (opts) => this.getLeaderboard({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
   }
 
   // ── Playbooks ──────────────────────────────────────────────
@@ -1424,6 +1460,30 @@ export class TalosClient {
     } & CursorRequestOptions,
   ): Promise<CursorPage<Playbook>> {
     return this.requestPage("/api/playbooks", params);
+  }
+
+  /**
+   * Async iterator for paginated playbooks.
+   *
+   * @example
+   * ```ts
+   * for await (const playbook of client.paginatePlaybooks({ category: "Marketing" })) {
+   *   console.log(playbook.title, playbook.price);
+   * }
+   * ```
+   */
+  paginatePlaybooks(options?: AsyncPaginationIteratorOptions & {
+    category?: string;
+    channel?: string;
+    search?: string;
+    sort?: "createdAt" | "price" | "title";
+    direction?: "asc" | "desc";
+  } & CursorRequestOptions): AsyncPaginationIterator<Playbook> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<Playbook>(
+      (opts) => this.listPlaybooks({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
   }
 
   async createPlaybook(

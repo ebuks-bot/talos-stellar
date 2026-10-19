@@ -7,14 +7,25 @@ export {
 } from "./client.js";
 export type {
   TalosClientOptions,
-  RetryOptions,
   RetryPolicyOptions,
+  RetryOptions,
   ResolvedRetryPolicy,
   ResolvedRetryOptions,
   TalosErrorEvent,
+  ReadOptions,
   WriteOptions,
   ReadOptions,
 } from "./client.js";
+
+// ── Pagination ─────────────────────────────────────────────────────
+
+export {
+  AsyncPaginationIterator,
+  createPaginationIterator,
+  PaginationAbortedError,
+  PaginationLimitExceededError,
+} from "./pagination.js";
+export type { AsyncPaginationIteratorOptions } from "./pagination.js";
 
 // ── Idempotency ───────────────────────────────────────────────────
 export {
@@ -22,7 +33,19 @@ export {
   validateIdempotencyKey,
   IdempotencyConflictError,
   isUuidV4,
+  isPayloadConflict,
   IDEMPOTENCY_KEY_MAX_BYTES,
+  // Client-side idempotency helpers
+  InMemoryIdempotencyStore,
+  createIdempotencyStore,
+  withIdempotency,
+  IdempotencyError,
+} from "./idempotency.js";
+export type {
+  IdempotencyRecord,
+  IdempotencyStore,
+  WithIdempotencyOptions,
+  IdempotencyErrorCode,
 } from "./idempotency.js";
 
 // ── Errors (typed hierarchy) ──────────────────────────────────────
@@ -51,10 +74,19 @@ export {
   snapshotHeaders,
   parseRetryAfter,
   parseX402Challenge,
-  redactEventPath,
-  diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
+
+// ── Feature Detection ─────────────────────────────────────────────
+//
+// Provides backwards-compatible feature detection for SDK capabilities.
+// This allows consumers to safely check for the presence of specific
+// features without breaking on older versions or environments.
+export {
+  detectFeature,
+  FeatureFlags,
+  FeatureStatus,
+} from "./features.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 
@@ -84,6 +116,13 @@ export {
   TalosEventStream,
   TalosStreamError,
   InMemorySeenStore,
+  TALOS_EVENT_SCHEMA_VERSION,
+  SCHEMA_VERSION_REQUEST_HEADER,
+  SCHEMA_VERSION_RESPONSE_HEADER,
+  SchemaVersionMismatchError,
+  negotiateSchemaVersion,
+  SSE_MAX_FIELD_BYTES,
+  SSE_MAX_DATA_LINES,
 } from "./events.js";
 export type {
   TalosEventType,
@@ -93,6 +132,7 @@ export type {
   TalosStreamCloseHandler,
   TalosEventStreamOptions,
   SeenStore,
+  SchemaVersionNegotiationResult,
 } from "./events.js";
 
 // ── Contract event decoding ───────────────────────────────────────────────────
@@ -232,3 +272,12 @@ export {
   GENERATED_TYPES_PACKAGE,
 } from "./provenance.js";
 export type { GeneratedTypesProvenance } from "./provenance.js";
+
+// ── Drift detection ──────────────────────────────────────────────────────────
+export { DriftDetector, DriftError } from "./drift.js";
+export type {
+  DriftMode,
+  UnknownFieldPolicy,
+  DriftViolation,
+  DriftDetectorOptions,
+} from "./drift.js";
