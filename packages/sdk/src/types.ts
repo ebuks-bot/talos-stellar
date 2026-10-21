@@ -450,3 +450,86 @@ export interface BuyerProofDiagnostics {
  * are available. Must not throw; exceptions are silently swallowed.
  */
 export type BuyerProofDiagnosticCallback = (diag: BuyerProofDiagnostics) => void;
+
+// ── Governance Proposals ─────────────────────────────────────────
+
+export const PROPOSAL_STATUSES = ["pending", "approved", "rejected"] as const;
+export type ProposalStatus = (typeof PROPOSAL_STATUSES)[number];
+
+export function isValidProposalStatus(status: unknown): status is ProposalStatus {
+  return typeof status === "string" && (PROPOSAL_STATUSES as readonly string[]).includes(status);
+}
+
+export interface ListProposalsParams {
+  status?: ProposalStatus | (string & {});
+  limit?: number;
+  signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
+}
+
+export interface Proposal {
+  id: string;
+  talosId: string;
+  talosName: string;
+  type: string;
+  title: string;
+  description: string | null;
+  amount: string | null;
+  status: ProposalStatus | string;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  txHash: string | null;
+  createdAt: string;
+}
+
+// ── Marketplace Search ───────────────────────────────────────────
+
+export interface CapabilityFilter {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  isActive: boolean;
+}
+
+export interface MarketplaceSearchResult {
+  id: string;
+  title: string;
+  description: string;
+  capabilities: string[];
+  price: number;
+  currency: string;
+  provider: string;
+  rating: number;
+  createdAt: string;
+}
+
+export interface MarketplaceSearchResponse {
+  results: MarketplaceSearchResult[];
+  total: number;
+  page: number;
+  limit: number;
+  filters: {
+    capabilities: CapabilityFilter[];
+  };
+}
+
+export interface MarketplaceSearchParams {
+  q?: string;
+  capabilities?: string[] | string;
+  limit?: number;
+  page?: number;
+  signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
+}
+
